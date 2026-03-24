@@ -43,7 +43,7 @@ swyk > find all TODO comments in the codebase
 ## ⚡ Install (One Command)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AiCodingBattle/swyk/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Chintanpatel24/swyk/main/install.sh | bash
 ```
 
 That's it. The installer will:
