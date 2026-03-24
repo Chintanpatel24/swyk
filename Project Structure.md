@@ -1,26 +1,27 @@
 <pre>
 
- swik/
-├── install.sh                      # one-liner curl installer
-├── uninstall.sh                    # clean removal
+ swyk/
+├── install.sh
+├── uninstall.sh
+├── LICENSE
+├── README.md
 ├── bin/
-│   └── swik                        # launcher (bash)
+│   └── swyk
 ├── core/
 │   ├── __init__.py
-│   ├── main.py                     # entry-point
-│   ├── agent.py                    # reasoning loop
-│   ├── llm_client.py              # Ollama / open-model HTTP client
-│   ├── tools.py                    # every tool the agent can call
-│   ├── sandbox.py                  # path-jail + symlink guard
-│   ├── permissions.py              # y / n gate for every write
-│   ├── config.py                   # ~/.swik/config.json
-│   ├── ui.py                       # colours, spinners, banners
-│   └── logger.py                   # append-only audit log
-├── sandbox-executor/               # optional Rust hardened executor
-│   ├── Cargo.toml
-│   └── src/
-│       └── main.rs
-├── README.md
-└── LICENSE                         # MIT 
+│   ├── main.py
+│   ├── config.py
+│   ├── api_client.py
+│   ├── agent_engine.py
+│   ├── sandbox.py
+│   ├── tools.py
+│   └── logger.py
+└── gui/
+    ├── __init__.py
+    ├── app.py
+    ├── office_canvas.py
+    ├── sprites.py
+    ├── chat_panel.py
+    └── dialogs.py
   
 </pre>
