@@ -1,33 +1,15 @@
-"""
-Append-only audit log at ~/.config/swyk/audit.log
-Every action (approved or declined) is recorded as a JSON line.
-"""
+"""Append-only audit log."""
+import json, os, time
 
-import json
-import os
-import time
-
-
-class AuditLogger:
-    def __init__(self, config_dir, enabled=True):
-        self._enabled = enabled
-        self._path = os.path.join(config_dir, "audit.log")
-        if enabled:
-            os.makedirs(os.path.dirname(self._path), exist_ok=True)
-
-    def log(self, action, params, approved, result="", workspace=""):
-        if not self._enabled:
-            return
-        entry = {
-            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "workspace": workspace,
-            "action": action,
-            "params": params,
-            "approved": approved,
-            "result": str(result)[:500],
-        }
+class Logger:
+    def __init__(self, enabled=True):
+        self._on = enabled
+        self._path = os.path.join(os.path.expanduser("~"), ".config", "swyk", "audit.log")
+    def log(self, action, params, approved, result=""):
+        if not self._on: return
         try:
             with open(self._path, "a") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
+                f.write(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "action": action, "params": params, "ok": approved,
+                    "result": str(result)[:300]}) + "\n")
+        except: pass
