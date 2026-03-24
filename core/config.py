@@ -1,14 +1,12 @@
 """
 Configuration loader.
-Reads $SWIK_ROOT/config.json and merges with per-workspace .swik.json.
+Reads ~/.config/swyk/config.json and optional .swyk.json in workspace.
+Pure stdlib — no dependencies.
 """
-
-from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
-from dataclasses import dataclass, field
+
 
 DEFAULTS = {
     "model": "mistral",
@@ -17,59 +15,46 @@ DEFAULTS = {
     "allow_shell_commands": False,
     "auto_approve_reads": True,
     "audit_log": True,
-    "theme": "dark",
-    "max_context_files": 20,
-    "history_length": 50,
+    "history_length": 40,
 }
 
 
-@dataclass
 class Config:
-    model: str = "mistral"
-    ollama_host: str = "http://127.0.0.1:11434"
-    max_file_size_mb: int = 10
-    allow_shell_commands: bool = False
-    auto_approve_reads: bool = True
-    audit_log: bool = True
-    theme: str = "dark"
-    max_context_files: int = 20
-    history_length: int = 50
-
-    # runtime (not serialised)
-    swik_root: str = ""
-    workspace: str = ""
+    def __init__(self):
+        self.model = DEFAULTS["model"]
+        self.ollama_host = DEFAULTS["ollama_host"]
+        self.max_file_size_mb = DEFAULTS["max_file_size_mb"]
+        self.allow_shell_commands = DEFAULTS["allow_shell_commands"]
+        self.auto_approve_reads = DEFAULTS["auto_approve_reads"]
+        self.audit_log = DEFAULTS["audit_log"]
+        self.history_length = DEFAULTS["history_length"]
+        self.swyk_root = os.environ.get("SWYK_ROOT", os.path.join(os.path.expanduser("~"), ".swyk"))
+        self.workspace = os.environ.get("SWYK_WORKSPACE", os.getcwd())
+        self.config_dir = os.path.join(os.path.expanduser("~"), ".config", "swyk")
 
     @classmethod
-    def load(cls) -> "Config":
-        swik_root = os.environ.get("SWIK_ROOT", str(Path.home() / ".swik"))
-        workspace = os.environ.get("SWIK_WORKSPACE", os.getcwd())
-
-        data = dict(DEFAULTS)
-
+    def load(cls):
+        c = cls()
         # global config
-        global_cfg = Path(swik_root) / "config.json"
-        if global_cfg.is_file():
-            with open(global_cfg) as f:
-                data.update(json.load(f))
-
-        # per-workspace override
-        local_cfg = Path(workspace) / ".swik.json"
-        if local_cfg.is_file():
-            with open(local_cfg) as f:
-                data.update(json.load(f))
-
-        cfg = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-        cfg.swik_root = swik_root
-        cfg.workspace = workspace
-        return cfg
-
-    def save_global(self) -> None:
-        path = Path(self.swik_root) / "config.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            k: getattr(self, k)
-            for k in self.__dataclass_fields__
-            if k not in ("swik_root", "workspace")
-        }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        gpath = os.path.join(c.config_dir, "config.json")
+        if os.path.isfile(gpath):
+            try:
+                with open(gpath, "r") as f:
+                    data = json.load(f)
+                for k, v in data.items():
+                    if hasattr(c, k):
+                        setattr(c, k, v)
+            except Exception:
+                pass
+        # workspace override
+        lpath = os.path.join(c.workspace, ".swyk.json")
+        if os.path.isfile(lpath):
+            try:
+                with open(lpath, "r") as f:
+                    data = json.load(f)
+                for k, v in data.items():
+                    if hasattr(c, k):
+                        setattr(c, k, v)
+            except Exception:
+                pass
+        return c
