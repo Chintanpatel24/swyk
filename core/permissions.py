@@ -1,120 +1,92 @@
 """
-Permission gate.
+Permission gate — every write/move/delete/exec must pass through here.
 
-Actions are classified into tiers:
-
-  TIER 0 – READ     → auto-approved  (list, read, search, info)
-  TIER 1 – WRITE    → requires y/n   (write, create dir)
-  TIER 2 – MOVE     → requires y/n   (move, copy, rename)
-  TIER 3 – DELETE   → requires y/n + confirmation text
-  TIER 4 – EXECUTE  → requires y/n   (shell commands)
+Tiers:
+  0 READ    -> auto-approved
+  1 WRITE   -> needs y/n
+  2 MOVE    -> needs y/n
+  3 DELETE  -> needs y/n
+  4 EXECUTE -> needs y/n
 """
 
-from __future__ import annotations
-
-from enum import IntEnum
-from typing import Dict, Optional
-
-from . import ui
-from .logger import AuditLogger
+from core import ui
+from core.logger import AuditLogger
 
 
-class Tier(IntEnum):
-    READ = 0
-    WRITE = 1
-    MOVE = 2
-    DELETE = 3
-    EXECUTE = 4
+TIER_READ = 0
+TIER_WRITE = 1
+TIER_MOVE = 2
+TIER_DELETE = 3
+TIER_EXECUTE = 4
 
-
-# map tool names → tiers
-TOOL_TIERS: Dict[str, Tier] = {
-    "list_files":      Tier.READ,
-    "read_file":       Tier.READ,
-    "search_files":    Tier.READ,
-    "search_content":  Tier.READ,
-    "file_info":       Tier.READ,
-    "workspace_tree":  Tier.READ,
-    "write_file":      Tier.WRITE,
-    "create_directory": Tier.WRITE,
-    "move_file":       Tier.MOVE,
-    "copy_file":       Tier.MOVE,
-    "delete_file":     Tier.DELETE,
-    "run_command":     Tier.EXECUTE,
+TOOL_TIERS = {
+    "list_files":       TIER_READ,
+    "read_file":        TIER_READ,
+    "search_files":     TIER_READ,
+    "search_content":   TIER_READ,
+    "file_info":        TIER_READ,
+    "workspace_tree":   TIER_READ,
+    "write_file":       TIER_WRITE,
+    "append_file":      TIER_WRITE,
+    "create_directory": TIER_WRITE,
+    "move_file":        TIER_MOVE,
+    "copy_file":        TIER_MOVE,
+    "delete_file":      TIER_DELETE,
+    "run_command":      TIER_EXECUTE,
 }
 
 
 class PermissionGate:
-    """Asks the human for approval before write / move / delete / exec."""
-
-    def __init__(
-        self,
-        auto_approve_reads: bool = True,
-        allow_shell: bool = False,
-        logger: Optional[AuditLogger] = None,
-        workspace: str = "",
-    ):
-        self.auto_approve_reads = auto_approve_reads
+    def __init__(self, auto_reads=True, allow_shell=False, logger=None, workspace=""):
+        self.auto_reads = auto_reads
         self.allow_shell = allow_shell
         self._logger = logger
         self._workspace = workspace
 
-    def check(self, tool_name: str, params: dict) -> bool:
-        """
-        Returns True if the action is approved (auto or by user).
-        Returns False if the user declines.
-        """
-        tier = TOOL_TIERS.get(tool_name, Tier.EXECUTE)
+    def check(self, tool_name, params):
+        """Returns True if action is approved."""
+        tier = TOOL_TIERS.get(tool_name, TIER_EXECUTE)
 
-        # shell commands globally disabled?
-        if tier == Tier.EXECUTE and not self.allow_shell:
-            ui.warn("Shell commands are disabled in config (allow_shell_commands=false).")
-            self._log(tool_name, params, approved=False, result="shell disabled")
+        if tier == TIER_EXECUTE and not self.allow_shell:
+            ui.warn("Shell commands disabled (allow_shell_commands=false in config)")
+            self._log(tool_name, params, False, "shell_disabled")
             return False
 
-        # auto-approve reads
-        if tier == Tier.READ and self.auto_approve_reads:
-            self._log(tool_name, params, approved=True, result="auto-read")
+        if tier == TIER_READ and self.auto_reads:
+            self._log(tool_name, params, True, "auto_read")
             return True
 
-        # build description
-        desc = self._describe(tool_name, params, tier)
+        desc = self._describe(tool_name, params)
         approved = ui.action_prompt(desc)
 
         if approved:
-            ui.success("Approved.")
+            ui.success("Approved")
         else:
-            ui.warn("Declined — action skipped.")
+            ui.warn("Declined — skipped")
 
-        self._log(tool_name, params, approved=approved)
+        self._log(tool_name, params, approved)
         return approved
 
-    # ── helpers ───────────────────────────────────────────────
-
-    @staticmethod
-    def _describe(tool: str, params: dict, tier: Tier) -> str:
+    def _describe(self, tool, params):
         p = params
         if tool == "write_file":
             size = len(p.get("content", ""))
-            return f"WRITE {p.get('path','?')}  ({size} chars)"
+            return "WRITE {} ({} chars)".format(p.get("path", "?"), size)
+        if tool == "append_file":
+            size = len(p.get("content", ""))
+            return "APPEND to {} ({} chars)".format(p.get("path", "?"), size)
         if tool == "move_file":
-            return f"MOVE {p.get('source','?')} → {p.get('destination','?')}"
+            return "MOVE {} -> {}".format(p.get("source", "?"), p.get("destination", "?"))
         if tool == "copy_file":
-            return f"COPY {p.get('source','?')} → {p.get('destination','?')}"
+            return "COPY {} -> {}".format(p.get("source", "?"), p.get("destination", "?"))
         if tool == "delete_file":
-            return f"⚠  DELETE {p.get('path','?')}  (cannot be undone)"
+            return "!! DELETE {} (cannot undo)".format(p.get("path", "?"))
         if tool == "create_directory":
-            return f"MKDIR {p.get('path','?')}"
+            return "MKDIR {}".format(p.get("path", "?"))
         if tool == "run_command":
-            return f"⚠  RUN SHELL COMMAND:  {p.get('command','?')}"
-        return f"{tool}({p})"
+            return "!! SHELL: {}".format(p.get("command", "?"))
+        return "{}({})".format(tool, p)
 
-    def _log(self, tool: str, params: dict, approved: bool, result: str = "") -> None:
+    def _log(self, tool, params, approved, result=""):
         if self._logger:
-            self._logger.log(
-                action=tool,
-                params=params,
-                approved=approved,
-                result=result,
-                workspace=self._workspace,
-            )
+            self._logger.log(tool, params, approved, result, self._workspace)
