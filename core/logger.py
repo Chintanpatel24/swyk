@@ -1,45 +1,33 @@
 """
-Immutable, append-only audit logger.
-
-Every file-system mutation is logged with a timestamp, the action,
-parameters, and whether the user approved it.  The log lives at
-  ~/.swik/audit.log
-and is human-readable (JSONL).
+Append-only audit log at ~/.config/swyk/audit.log
+Every action (approved or declined) is recorded as a JSON line.
 """
-
-from __future__ import annotations
 
 import json
 import os
 import time
-from pathlib import Path
 
 
 class AuditLogger:
-    def __init__(self, swik_root: str, enabled: bool = True):
+    def __init__(self, config_dir, enabled=True):
         self._enabled = enabled
-        self._path = Path(swik_root) / "audit.log"
+        self._path = os.path.join(config_dir, "audit.log")
         if enabled:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
 
-    def log(
-        self,
-        action: str,
-        params: dict,
-        approved: bool,
-        result: str = "",
-        workspace: str = "",
-    ) -> None:
+    def log(self, action, params, approved, result="", workspace=""):
         if not self._enabled:
             return
         entry = {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "epoch": time.time(),
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "workspace": workspace,
             "action": action,
             "params": params,
             "approved": approved,
-            "result": result[:500],         # cap result size
+            "result": str(result)[:500],
         }
-        with open(self._path, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        try:
+            with open(self._path, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
