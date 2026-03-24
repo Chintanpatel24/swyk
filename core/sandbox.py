@@ -1,222 +1,217 @@
 """
-Filesystem sandbox.
+Filesystem sandbox — pure Python path jail.
 
-Rules
-─────
-1.  Every path is resolved to an absolute real-path *before* any I/O.
-2.  The real-path must start with the sandbox root.
-3.  Symlinks that escape the sandbox are blocked.
-4.  Files above max_file_size_mb are refused.
-5.  Hidden config files (.env, .git/config, etc.) are readable but
-    not writable unless explicitly unlocked.
-
-This module never calls os.system / subprocess.  Shell execution
-is handled separately in tools.py with its own gate.
+Every path is resolved to real absolute form and verified to
+live inside the workspace root. Symlink escapes, '..' traversal,
+and writes to sensitive files are all blocked.
 """
 
-from __future__ import annotations
-
 import os
-import stat
-from pathlib import Path
-from typing import List, Optional
+import shutil
+import stat as stat_mod
 
 
 class SandboxError(Exception):
-    """Raised when an operation violates the sandbox."""
+    """Raised when an operation violates the sandbox boundary."""
 
 
 class Sandbox:
-    """Jails all file operations to *root* and its descendants."""
-
-    # files that may contain secrets — block writes by default
-    SENSITIVE_NAMES = frozenset({
-        ".env", ".env.local", ".env.production",
-        ".git/config", ".npmrc", ".pypirc",
-        "id_rsa", "id_ed25519", ".ssh",
+    SENSITIVE = frozenset({
+        ".env", ".env.local", ".env.production", ".env.staging",
+        ".npmrc", ".pypirc", "id_rsa", "id_ed25519",
     })
 
-    def __init__(self, root: str, max_file_size_mb: int = 10):
-        self.root = Path(root).resolve(strict=True)
-        if not self.root.is_dir():
-            raise SandboxError(f"Sandbox root is not a directory: {self.root}")
+    def __init__(self, root, max_file_size_mb=10):
+        real = os.path.realpath(os.path.abspath(root))
+        if not os.path.isdir(real):
+            raise SandboxError("Not a directory: {}".format(real))
+        self.root = real
         self.max_bytes = max_file_size_mb * 1024 * 1024
 
-    # ── path validation ───────────────────────────────────────
+    # --- path resolution ---
 
-    def resolve(self, user_path: str) -> Path:
-        """
-        Resolve *user_path* (may be relative) to an absolute path
-        that is guaranteed to live inside the sandbox.
-        Raises SandboxError on escape attempts.
-        """
-        # join with root if relative
-        candidate = Path(user_path)
-        if not candidate.is_absolute():
-            candidate = self.root / candidate
+    def resolve(self, user_path):
+        """Resolve user_path to an absolute real path inside the sandbox."""
+        if os.path.isabs(user_path):
+            candidate = user_path
+        else:
+            candidate = os.path.join(self.root, user_path)
 
-        # resolve symlinks, "..", etc.
-        try:
-            resolved = candidate.resolve()
-        except OSError as exc:
-            # for new files the parent must exist & be inside sandbox
-            parent = candidate.parent.resolve()
-            if not self._inside(parent):
-                raise SandboxError(
-                    f"Path escapes sandbox: {user_path}"
-                ) from exc
-            resolved = parent / candidate.name
+        # for existing paths resolve fully
+        if os.path.exists(candidate):
+            resolved = os.path.realpath(candidate)
+        else:
+            # for new paths resolve the parent
+            parent = os.path.dirname(candidate)
+            if os.path.exists(parent):
+                parent = os.path.realpath(parent)
+            else:
+                parent = os.path.realpath(parent)
+            resolved = os.path.join(parent, os.path.basename(candidate))
+
+        resolved = os.path.normpath(resolved)
 
         if not self._inside(resolved):
-            raise SandboxError(f"Path escapes sandbox: {user_path} → {resolved}")
+            raise SandboxError("Path escapes workspace: {} -> {}".format(user_path, resolved))
 
         return resolved
 
-    def _inside(self, path: Path) -> bool:
-        """True if *path* is the root or a child of it."""
-        try:
-            path.relative_to(self.root)
-            return True
-        except ValueError:
-            return False
+    def _inside(self, path):
+        # path must equal root or be under root/
+        return path == self.root or path.startswith(self.root + os.sep)
 
-    # ── guards ────────────────────────────────────────────────
+    def _relpath(self, abspath):
+        return os.path.relpath(abspath, self.root)
 
-    def guard_read(self, path: Path) -> None:
-        if not path.exists():
-            raise SandboxError(f"File does not exist: {path}")
-        if path.is_file() and path.stat().st_size > self.max_bytes:
-            mb = path.stat().st_size / (1024 * 1024)
-            raise SandboxError(
-                f"File too large ({mb:.1f} MB > {self.max_bytes // (1024*1024)} MB limit)"
-            )
+    # --- guards ---
 
-    def guard_write(self, path: Path) -> None:
-        # block writes to sensitive files
-        rel = str(path.relative_to(self.root))
-        for s in self.SENSITIVE_NAMES:
-            if rel == s or rel.endswith(f"/{s}"):
-                raise SandboxError(
-                    f"Write to sensitive file blocked: {rel}  "
-                    f"(unlock with /config allow_sensitive_write)"
-                )
+    def _guard_read(self, path):
+        if not os.path.exists(path):
+            raise SandboxError("Does not exist: {}".format(self._relpath(path)))
+        if os.path.isfile(path):
+            size = os.path.getsize(path)
+            if size > self.max_bytes:
+                raise SandboxError("File too large: {:.1f}MB (limit {}MB)".format(
+                    size / 1048576, self.max_bytes // 1048576))
 
-    def guard_delete(self, path: Path) -> None:
-        self.guard_write(path)
-        if path == self.root:
-            raise SandboxError("Cannot delete the sandbox root.")
+    def _guard_write(self, path):
+        basename = os.path.basename(path)
+        if basename in self.SENSITIVE:
+            raise SandboxError("Write to sensitive file blocked: {}".format(basename))
 
-    # ── high-level queries ────────────────────────────────────
+    def _guard_delete(self, path):
+        self._guard_write(path)
+        if os.path.realpath(path) == self.root:
+            raise SandboxError("Cannot delete workspace root")
 
-    def list_dir(self, rel: str = ".") -> List[str]:
+    # --- operations ---
+
+    def list_dir(self, rel="."):
         target = self.resolve(rel)
-        self.guard_read(target)
-        if not target.is_dir():
-            raise SandboxError(f"Not a directory: {target}")
+        self._guard_read(target)
+        if not os.path.isdir(target):
+            raise SandboxError("Not a directory: {}".format(rel))
         entries = []
-        for child in sorted(target.iterdir()):
-            name = child.name
-            if child.is_dir():
-                name += "/"
-            entries.append(name)
+        for name in sorted(os.listdir(target)):
+            full = os.path.join(target, name)
+            if os.path.isdir(full):
+                entries.append(name + "/")
+            else:
+                entries.append(name)
         return entries
 
-    def walk(self, rel: str = ".", max_files: int = 500) -> List[str]:
-        """Return a flat list of relative paths under *rel*."""
+    def walk(self, rel=".", max_files=500):
         target = self.resolve(rel)
-        self.guard_read(target)
-        results: List[str] = []
+        self._guard_read(target)
+        results = []
         for dirpath, dirnames, filenames in os.walk(target):
-            # skip hidden version-control dirs
-            dirnames[:] = [d for d in dirnames if not d.startswith(".git")]
-            for fn in filenames:
-                full = Path(dirpath) / fn
-                results.append(str(full.relative_to(self.root)))
+            # skip hidden VCS dirs
+            dirnames[:] = [d for d in sorted(dirnames) if d not in (".git", ".svn", ".hg", "__pycache__", "node_modules", ".venv", "venv")]
+            for fn in sorted(filenames):
+                full = os.path.join(dirpath, fn)
+                results.append(os.path.relpath(full, self.root))
                 if len(results) >= max_files:
                     return results
         return results
 
-    def read_file(self, rel: str) -> str:
+    def read_file(self, rel):
         path = self.resolve(rel)
-        self.guard_read(path)
+        self._guard_read(path)
+        if not os.path.isfile(path):
+            raise SandboxError("Not a file: {}".format(rel))
         with open(path, "r", errors="replace") as f:
             return f.read()
 
-    def write_file(self, rel: str, content: str) -> str:
+    def write_file(self, rel, content):
         path = self.resolve(rel)
-        self.guard_write(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        self._guard_write(path)
+        parent = os.path.dirname(path)
+        if not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w") as f:
             f.write(content)
-        return f"Wrote {len(content)} bytes → {path.relative_to(self.root)}"
+        return "Wrote {} bytes -> {}".format(len(content), self._relpath(path))
 
-    def move_file(self, src_rel: str, dst_rel: str) -> str:
-        src = self.resolve(src_rel)
-        dst = self.resolve(dst_rel)
-        self.guard_read(src)
-        self.guard_write(dst)
-        if dst.is_dir():
-            dst = dst / src.name
-            if not self._inside(dst):
-                raise SandboxError("Destination escapes sandbox after join.")
-        src.rename(dst)
-        return f"Moved {src.relative_to(self.root)} → {dst.relative_to(self.root)}"
-
-    def copy_file(self, src_rel: str, dst_rel: str) -> str:
-        import shutil
-        src = self.resolve(src_rel)
-        dst = self.resolve(dst_rel)
-        self.guard_read(src)
-        self.guard_write(dst)
-        if dst.is_dir():
-            dst = dst / src.name
-        if src.is_dir():
-            shutil.copytree(str(src), str(dst))
-        else:
-            shutil.copy2(str(src), str(dst))
-        return f"Copied → {dst.relative_to(self.root)}"
-
-    def delete_file(self, rel: str) -> str:
-        import shutil
+    def append_file(self, rel, content):
         path = self.resolve(rel)
-        self.guard_delete(path)
-        if path.is_dir():
+        self._guard_write(path)
+        with open(path, "a") as f:
+            f.write(content)
+        return "Appended {} bytes -> {}".format(len(content), self._relpath(path))
+
+    def move_file(self, src_rel, dst_rel):
+        src = self.resolve(src_rel)
+        dst = self.resolve(dst_rel)
+        self._guard_read(src)
+        self._guard_write(dst)
+        if os.path.isdir(dst):
+            dst = os.path.join(dst, os.path.basename(src))
+            if not self._inside(dst):
+                raise SandboxError("Destination escapes workspace")
+        parent = os.path.dirname(dst)
+        if not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+        os.rename(src, dst)
+        return "Moved {} -> {}".format(self._relpath(src), self._relpath(dst))
+
+    def copy_file(self, src_rel, dst_rel):
+        src = self.resolve(src_rel)
+        dst = self.resolve(dst_rel)
+        self._guard_read(src)
+        self._guard_write(dst)
+        if os.path.isdir(dst):
+            dst = os.path.join(dst, os.path.basename(src))
+        parent = os.path.dirname(dst)
+        if not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+        return "Copied -> {}".format(self._relpath(dst))
+
+    def delete(self, rel):
+        path = self.resolve(rel)
+        self._guard_delete(path)
+        if not os.path.exists(path):
+            raise SandboxError("Does not exist: {}".format(rel))
+        if os.path.isdir(path):
             shutil.rmtree(path)
         else:
-            path.unlink()
-        return f"Deleted {path.relative_to(self.root)}"
+            os.remove(path)
+        return "Deleted {}".format(self._relpath(path))
 
-    def mkdir(self, rel: str) -> str:
+    def mkdir(self, rel):
         path = self.resolve(rel)
-        self.guard_write(path)
-        path.mkdir(parents=True, exist_ok=True)
-        return f"Created directory {path.relative_to(self.root)}"
+        self._guard_write(path)
+        os.makedirs(path, exist_ok=True)
+        return "Created directory {}".format(self._relpath(path))
 
-    def file_info(self, rel: str) -> dict:
+    def file_info(self, rel):
         path = self.resolve(rel)
-        self.guard_read(path)
-        st = path.stat()
+        self._guard_read(path)
+        st = os.stat(path)
         return {
-            "name": path.name,
-            "path": str(path.relative_to(self.root)),
+            "name": os.path.basename(path),
+            "path": self._relpath(path),
             "size": st.st_size,
-            "is_dir": path.is_dir(),
-            "permissions": stat.filemode(st.st_mode),
+            "is_dir": os.path.isdir(path),
+            "permissions": stat_mod.filemode(st.st_mode),
             "modified": st.st_mtime,
         }
 
-    def search_content(self, query: str, rel: str = ".") -> List[dict]:
-        """Grep-like search across files."""
+    def search_content(self, query, rel="."):
         target = self.resolve(rel)
         results = []
-        for fpath in self.walk(rel, max_files=200):
-            full = self.root / fpath
-            if not full.is_file():
+        q = query.lower()
+        for fpath in self.walk(rel, max_files=300):
+            full = os.path.join(self.root, fpath)
+            if not os.path.isfile(full):
                 continue
             try:
                 with open(full, "r", errors="replace") as f:
                     for i, line in enumerate(f, 1):
-                        if query.lower() in line.lower():
+                        if q in line.lower():
                             results.append({
                                 "file": fpath,
                                 "line": i,
@@ -228,8 +223,8 @@ class Sandbox:
                 continue
         return results
 
-    def search_files(self, pattern: str) -> List[str]:
-        """Glob search."""
+    def search_files(self, pattern):
         import fnmatch
         all_files = self.walk(".", max_files=1000)
-        return [f for f in all_files if fnmatch.fnmatch(f.lower(), pattern.lower())]
+        return [f for f in all_files if fnmatch.fnmatch(os.path.basename(f).lower(), pattern.lower())
+                or fnmatch.fnmatch(f.lower(), pattern.lower())]
