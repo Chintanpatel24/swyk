@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# ── SWIK launcher ─────────────────────────────────────────────
-# Resolves the real install dir regardless of symlinks, then
-# hands off to Python.
-# ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
 SOURCE="${BASH_SOURCE[0]}"
@@ -11,14 +7,14 @@ while [ -L "$SOURCE" ]; do
     SOURCE="$(readlink "$SOURCE")"
     [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
 done
-SWIK_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+SWYK_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
-export SWIK_ROOT
-export SWIK_WORKSPACE="$(pwd)"       # the directory the user is in right now
+export SWYK_ROOT
+export SWYK_WORKSPACE="$(pwd)"
 
-# pick python
+PY=""
 if command -v python3 &>/dev/null; then PY=python3
 elif command -v python &>/dev/null; then PY=python
 else echo "Python 3 not found."; exit 1; fi
 
-exec "$PY" -u "$SWIK_ROOT/core/main.py" "$@"
+exec "$PY" -u "$SWYK_ROOT/core/main.py" "$@"
